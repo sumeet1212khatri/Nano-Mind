@@ -9,6 +9,15 @@
 [**Launch Live Demo on HuggingFace Spaces →**](https://huggingface.co/spaces/NOT-OMEGA/NanoMind)
 
 ---
+## Benchmarks
+
+<img width="247" height="199" alt="image" src="https://github.com/user-attachments/assets/e87eda99-48b1-4eb1-99ea-52b0cd462aeb" />
+
+
+## HHD
+
+<img width="1523" height="836" alt="image" src="https://github.com/user-attachments/assets/a1d718eb-0dbf-46f6-935d-769a40bc68bc" />
+
 
 ## ✨ Key Features
 
