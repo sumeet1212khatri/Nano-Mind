@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>NanoMind · 152M</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;700&family=DM+Sans:wght@300;500;700;900&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:   #06080f; --bg1:  #0c0f1a; --bg2:  #121627; --bg3:  #1a2035; --bg4:  #222840;
+  --acc:  #7c6bff; --acc2: #9d8fff; --acc3: #5a48e0;
+  --dim:  rgba(124,107,255,.08); --dimb: rgba(124,107,255,.18);
+  --cyan: #3ddcff; --green:#3dffb4; --red:#ff5c6e; --warn:#ffc260;
+  --t0:#f2f0ff; --t1:#c0bde8; --t2:#7a78a0; --t3:#3a384d;
+  --mono:'IBM Plex Mono',monospace; --sans:'DM Sans',sans-serif;
+  --r:8px; --sb:280px;
+}
+html,body{height:100%;background:var(--bg);color:var(--t0);font-family:var(--mono);font-size:13px;overflow:hidden}
+.app{display:flex;height:100vh}
+
+/* ── Noise overlay for depth ── */
+.app::before{content:'';position:fixed;inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events:none;z-index:0;opacity:.4}
+.app>*{position:relative;z-index:1}
+
+/* ══ SIDEBAR ═════════════════════════════════════════════════ */
+.sb{width:var(--sb);min-width:var(--sb);background:var(--bg1);
+  border-right:1px solid var(--bg3);display:flex;flex-direction:column;overflow:hidden}
+
+.sb-logo{padding:16px;background:var(--bg);border-bottom:1px solid var(--bg3);flex-shrink:0}
+.logo-row{display:flex;align-items:center;gap:10px}
+.logo-icon{width:34px;height:34px;border-radius:9px;
+  background:linear-gradient(135deg,var(--acc3),var(--acc2));
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  box-shadow:0 0 20px rgba(124,107,255,.35)}
+.logo-icon svg{fill:#fff}
+.logo-text h2{font-family:var(--sans);font-size:18px;font-weight:900;
+  letter-spacing:-.04em;color:var(--t0)}
+.logo-text h2 em{color:var(--acc2);font-style:normal}
+.logo-text p{font-size:9px;color:var(--t2);margin-top:2px;
+  letter-spacing:.1em;text-transform:uppercase}
+
+/* Tabs */
+.sb-tabs{display:flex;border-bottom:1px solid var(--bg3);flex-shrink:0;background:var(--bg1)}
+.sb-tab{flex:1;padding:8px 4px;text-align:center;font-size:9px;font-weight:700;
+  color:var(--t2);text-transform:uppercase;letter-spacing:.08em;cursor:pointer;
+  border:none;background:none;font-family:var(--mono);
+  border-bottom:2px solid transparent;transition:.15s}
+.sb-tab.on{color:var(--acc2);border-bottom-color:var(--acc);background:var(--dim)}
+
+/* Scrollable body */
+.sb-body{flex:1;overflow-y:auto;padding:10px;
+  scrollbar-width:thin;scrollbar-color:var(--bg4) transparent}
+
+/* Cards */
+.card{background:var(--bg2);border:1px solid var(--bg3);border-radius:var(--r);
+  padding:11px 13px;margin-bottom:8px}
+.ct{font-size:9px;font-weight:700;color:var(--t2);text-transform:uppercase;
+  letter-spacing:.1em;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+
+/* Stat rows */
+.sr{display:flex;justify-content:space-between;align-items:center;padding:3px 0}
+.sl{color:var(--t1);font-size:11px}
+.sv{font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--t0)}
+.g{color:var(--green)}.c{color:var(--cyan)}.y{color:var(--warn)}.r{color:var(--red)}.p{color:var(--acc2)}
+
+/* Live dot */
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.dot.off{background:var(--t3)}.dot.on{background:var(--green);animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.7)}}
+
+canvas#spark{width:100%;height:44px;display:block;border-radius:var(--r);background:var(--bg)}
+
+.ta{width:100%;background:var(--bg);border:1px solid var(--bg3);border-radius:var(--r);
+  color:var(--t0);font-size:11px;padding:8px 10px;resize:vertical;
+  min-height:56px;font-family:var(--mono);line-height:1.6}
+.ta:focus{outline:none;border-color:var(--acc)}
+
+.pg{display:flex;flex-direction:column;gap:4px}
+.pg label{font-size:9px;color:var(--t2);text-transform:uppercase;
+  letter-spacing:.08em;display:flex;justify-content:space-between}
+.pg label span{color:var(--acc2);font-weight:700}
+.pg input[type=range]{width:100%;-webkit-appearance:none;height:2px;
+  background:var(--bg4);border-radius:1px;outline:none}
+.pg input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;
+  border-radius:50%;background:var(--acc);cursor:pointer;border:2px solid var(--bg1)}
+
+.btn{display:inline-flex;align-items:center;gap:5px;padding:6px 12px;
+  border-radius:var(--r);border:1px solid var(--bg4);cursor:pointer;
+  font-size:10px;font-weight:700;font-family:var(--mono);
+  text-transform:uppercase;letter-spacing:.05em;transition:.13s}
+.bp{background:var(--acc);color:#fff;border-color:var(--acc)}
+.bp:hover{background:var(--acc2)}.bs{background:var(--bg3);color:var(--t1)}
+.bs:hover{background:var(--bg4);color:var(--t0)}
+.btn.full{width:100%;justify-content:center}.btn:disabled{opacity:.3;cursor:not-allowed}
+
+/* ══ BENCHMARK PANEL ════════════════════════════════════════ */
+#bench-panel{display:none;flex-direction:column;height:100%;overflow:hidden}
+#bench-panel.visible{display:flex}
+#stats-panel,#params-panel{display:flex;flex-direction:column;flex:1;overflow:hidden}
+
+.bench-actions{padding:10px;flex-shrink:0;display:flex;flex-direction:column;gap:6px}
+.bench-scroll{flex:1;overflow-y:auto;padding:0 10px 10px;
+  scrollbar-width:thin;scrollbar-color:var(--bg4) transparent}
+
+/* Benchmark summary grid */
+.b-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:10px}
+.b-stat{background:var(--bg2);border:1px solid var(--bg3);border-radius:var(--r);
+  padding:10px;text-align:center}
+.b-stat .bv{font-family:var(--sans);font-size:22px;font-weight:900;
+  color:var(--acc2);letter-spacing:-.04em}
+.b-stat .bk{font-size:9px;color:var(--t2);text-transform:uppercase;
+  letter-spacing:.1em;margin-top:2px}
+
+/* Phase cards */
+.ph-card{background:var(--bg2);border:1px solid var(--bg3);border-radius:var(--r);
+  padding:9px 11px;margin-bottom:6px;animation:fadeup .2s ease}
+.ph-title{font-size:9px;font-weight:700;color:var(--acc2);
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+.ph-label{font-size:11px;color:var(--t2);margin-bottom:4px}
+.ph-stats{display:flex;gap:8px;flex-wrap:wrap;margin-top:5px}
+.ph-stat{display:flex;flex-direction:column;gap:1px;min-width:50px}
+.ph-stat .pv{font-size:13px;font-weight:700;color:var(--green);font-variant-numeric:tabular-nums}
+.ph-stat .pk{font-size:9px;color:var(--t2);text-transform:uppercase;letter-spacing:.06em}
+.ph-bar{height:2px;background:var(--bg4);border-radius:1px;margin-top:5px;overflow:hidden}
+.ph-fill{height:100%;background:linear-gradient(90deg,var(--acc3),var(--acc2));
+  border-radius:1px;transition:width .5s ease;width:0%}
+.ph-running{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--warn)}
+.spin{width:8px;height:8px;border:1.5px solid var(--warn);border-top-color:transparent;
+  border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bench-empty{text-align:center;padding:30px 16px;color:var(--t2);font-size:12px;line-height:1.9}
+.verdict{padding:10px 12px;border-radius:var(--r);font-size:11px;margin-bottom:8px;
+  border:1px solid var(--bg3)}
+.verdict.good{border-color:rgba(61,255,180,.3);background:rgba(61,255,180,.06);color:var(--green)}
+.verdict.mid{border-color:rgba(255,194,96,.3);background:rgba(255,194,96,.06);color:var(--warn)}
+
+/* ══ CHAT ════════════════════════════════════════════════════ */
+.chat{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+.chat-hdr{height:50px;display:flex;align-items:center;padding:0 20px;
+  border-bottom:1px solid var(--bg3);background:var(--bg1);gap:8px;flex-shrink:0}
+.badge{background:var(--dim);border:1px solid rgba(124,107,255,.3);border-radius:20px;
+  padding:3px 10px;font-size:10px;font-weight:700;color:var(--acc2);font-family:var(--sans)}
+.hdr-title{font-family:var(--sans);font-size:13px;font-weight:600;color:var(--t1)}
+.spc{flex:1}
+.hpill{display:flex;align-items:center;gap:6px;
+  font-size:10px;color:var(--t2);text-transform:uppercase;letter-spacing:.06em}
+
+.msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;
+  scrollbar-width:thin;scrollbar-color:var(--bg4) transparent}
+
+/* Welcome */
+.welcome{flex:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:14px;text-align:center;padding:40px;animation:fadeup .4s ease}
+.wlogo{font-family:var(--sans);font-size:72px;font-weight:900;
+  background:linear-gradient(135deg,var(--acc),var(--cyan));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;letter-spacing:-.05em;line-height:1}
+.welcome h2{font-family:var(--sans);font-size:22px;font-weight:700;
+  color:var(--t0);letter-spacing:-.02em}
+.welcome p{max-width:400px;line-height:1.8;font-size:12px;color:var(--t1)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:2px}
+.chip{font-size:9px;padding:4px 10px;border:1px solid var(--bg4);border-radius:20px;
+  color:var(--t2);letter-spacing:.07em;text-transform:uppercase;background:var(--bg2)}
+
+/* Messages */
+.mg{display:flex;gap:0;padding:14px 20px;border-bottom:1px solid var(--bg3);
+  animation:fadeup .18s ease}
+.mg:last-child{border-bottom:none}
+@keyframes fadeup{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.mg-role{width:60px;flex-shrink:0;padding-top:2px}
+.mlabel{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.mg.user .mlabel{color:var(--acc2)}.mg.asst .mlabel{color:var(--cyan)}
+.mg-body{flex:1;min-width:0}
+.bubble{font-size:13px;line-height:1.75;color:var(--t1);
+  white-space:pre-wrap;word-break:break-word;max-width:660px}
+.mg.user .bubble{color:var(--t2)}
+.cur{display:inline-block;width:7px;height:2px;background:var(--acc2);
+  margin-left:3px;vertical-align:middle;animation:blink .6s infinite}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+.bmeta{font-size:10px;color:var(--t3);margin-top:5px;display:flex;flex-wrap:wrap;gap:8px}
+.bmeta b{color:var(--acc2)}
+
+/* Input */
+.inputbar{padding:12px 16px;border-top:1px solid var(--bg3);
+  background:var(--bg1);flex-shrink:0}
+.inputwrap{background:var(--bg2);border:1px solid var(--bg3);border-radius:var(--r);
+  display:flex;align-items:flex-end;padding:3px 3px 3px 12px;gap:4px;transition:.13s}
+.inputwrap:focus-within{border-color:var(--acc)}
+#inp{flex:1;background:none;border:none;outline:none;color:var(--t0);
+  font-size:13px;font-family:var(--mono);resize:none;line-height:1.6;
+  max-height:110px;padding:7px 0}
+#inp::placeholder{color:var(--t3)}
+.sbtn{background:linear-gradient(135deg,var(--acc3),var(--acc2));border:none;cursor:pointer;
+  width:32px;height:32px;border-radius:6px;display:flex;align-items:center;
+  justify-content:center;flex-shrink:0;transition:.13s;
+  align-self:flex-end;margin-bottom:3px;
+  box-shadow:0 0 12px rgba(124,107,255,.4)}
+.sbtn:hover{filter:brightness(1.15)}.sbtn:disabled{opacity:.3;cursor:not-allowed}
+.sbtn svg{fill:#fff}
+.hint{margin-top:5px;font-size:10px;color:var(--t3);text-align:right;letter-spacing:.04em}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ══ SIDEBAR ════════════════════════════════════════════════ -->
+<aside class="sb">
+  <div class="sb-logo">
+    <div class="logo-row">
+      <div class="logo-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24">
+          <path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.516 6.516 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5Z"/>
+        </svg>
+      </div>
+      <div class="logo-text">
+        <h2>Nano<em>Mind</em></h2>
+        <p>152M · GPT-2 · AVX2 + OpenMP</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="sb-tabs">
+    <button class="sb-tab on" id="tab-stats"  onclick="switchTab('stats')">Stats</button>
+    <button class="sb-tab"    id="tab-bench"  onclick="switchTab('bench')">Bench</button>
+    <button class="sb-tab"    id="tab-params" onclick="switchTab('params')">Params</button>
+  </div>
+
+  <!-- ── Stats Tab ── -->
+  <div id="stats-panel">
+    <div class="sb-body">
+      <div class="card">
+        <div class="ct"><span class="dot off" id="dot-s"></span>Live</div>
+        <div class="sr"><span class="sl">Throughput</span><span class="sv g"  id="s-tps">—</span></div>
+        <div class="sr"><span class="sl">TTFT</span>       <span class="sv c"  id="s-ttft">—</span></div>
+        <div class="sr"><span class="sl">Tokens out</span><span class="sv"    id="s-toks">—</span></div>
+        <div class="sr"><span class="sl">Latency</span>    <span class="sv y"  id="s-lat">—</span></div>
+      </div>
+      <div class="card">
+        <div class="ct">Throughput History</div>
+        <canvas id="spark"></canvas>
+        <div style="margin-top:6px">
+          <div class="sr"><span class="sl">Session avg</span><span class="sv g" id="s-avg">—</span></div>
+          <div class="sr"><span class="sl">Peak</span>        <span class="sv g" id="s-peak">—</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="ct">Session</div>
+        <div class="sr"><span class="sl">Turns</span>          <span class="sv"  id="s-turns">0</span></div>
+        <div class="sr"><span class="sl">Total tokens</span>   <span class="sv"  id="s-totok">0</span></div>
+        <div class="sr"><span class="sl">KV cache</span>       <span class="sv c" id="s-kv">—</span></div>
+        <div class="sr"><span class="sl">Server RAM</span>     <span class="sv"  id="s-ram">—</span></div>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button class="btn bs full" onclick="clearChat()">↺ Reset</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="ct">Engine</div>
+        <div class="sr"><span class="sl">Status</span>  <span class="sv g" id="s-eng">—</span></div>
+        <div class="sr"><span class="sl">Sessions</span><span class="sv"   id="s-sess">—</span></div>
+        <div class="sr"><span class="sl">Uptime</span>  <span class="sv"   id="s-up">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Benchmark Tab ── -->
+  <div id="bench-panel">
+    <div class="bench-actions">
+      <button class="btn bp full" id="btnbench" onclick="runBench()">▶ Run Benchmark</button>
+      <div style="font-size:9px;color:var(--t2);text-align:center;line-height:1.6">
+        5 phases · cold/warm TTFT · throughput · concurrency
+      </div>
+    </div>
+    <div class="bench-scroll" id="bench-scroll">
+      <div class="bench-empty" id="bench-empty">
+        Run benchmark to measure<br>real system performance
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Params Tab ── -->
+  <div id="params-panel" style="display:none">
+    <div class="sb-body">
+      <div class="card">
+        <div class="ct">System Prompt</div>
+        <textarea class="ta" id="sysprompt" rows="4"
+          >You are a helpful, thoughtful, and articulate AI assistant.</textarea>
+      </div>
+      <div class="card">
+        <div class="ct">Generation</div>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:2px">
+          <div class="pg">
+            <label>Temperature <span id="v-temp">0.70</span></label>
+            <input type="range" id="p-temp" min="0.1" max="2.0" step="0.05" value="0.7"
+              oninput="document.getElementById('v-temp').textContent=parseFloat(this.value).toFixed(2)">
+          </div>
+          <div class="pg">
+            <label>Top-K <span id="v-topk">40</span></label>
+            <input type="range" id="p-topk" min="1" max="200" step="1" value="40"
+              oninput="document.getElementById('v-topk').textContent=this.value">
+          </div>
+          <div class="pg">
+            <label>Max tokens <span id="v-maxt">200</span></label>
+            <input type="range" id="p-maxt" min="20" max="500" step="10" value="200"
+              oninput="document.getElementById('v-maxt').textContent=this.value">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- ══ CHAT ════════════════════════════════════════════════════ -->
+<main class="chat">
+  <header class="chat-hdr">
+    <div class="badge">NanoMind · 152M</div>
+    <span class="hdr-title">Chat</span>
+    <div class="spc"></div>
+    <div class="hpill">
+      <span class="dot off" id="dot-h"></span>
+      <span id="hstatus">Idle</span>
+    </div>
+  </header>
+
+  <div class="msgs" id="msgs">
+    <div class="welcome" id="welcome">
+      <div class="wlogo">NM</div>
+      <h2>NanoMind Studio</h2>
+      <p>152M parameter GPT-2 model trained on GPT-4 quality data —
+         running on a hand-written C++ inference engine with AVX2 SIMD,
+         OpenMP parallelism &amp; persistent KV-cache.</p>
+      <div class="chips">
+        <span class="chip">152M params</span>
+        <span class="chip">AVX2 SIMD</span>
+        <span class="chip">OpenMP</span>
+        <span class="chip">KV Cache</span>
+        <span class="chip">Streaming</span>
+        <span class="chip">GPT-4 Data</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="inputbar">
+    <div class="inputwrap">
+      <textarea id="inp" rows="1" placeholder="Send a message…"
+        onkeydown="handleKey(event)"></textarea>
+      <button class="sbtn" id="sbtn" onclick="send()">
+        <svg width="14" height="14" viewBox="0 0 24 24">
+          <path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/>
+        </svg>
+      </button>
+    </div>
+    <div class="hint">Enter ↵ to send · Shift+Enter for newline</div>
+  </div>
+</main>
+</div>
+
+<script>
+// ══ State ════════════════════════════════════════════════════
+const API  = '';
+let sessId = crypto.randomUUID();
+let busy   = false, turns = 0, totalToks = 0;
+let tpsHist = [], peakTps = 0;
+
+// ══ Tab Switch ═══════════════════════════════════════════════
+function switchTab(name) {
+  ['stats','bench','params'].forEach(t => {
+    const panelId = t === 'stats' ? 'stats-panel' : t + '-panel';
+    const panel   = document.getElementById(panelId);
+    const tab     = document.getElementById('tab-' + t);
+    const show    = t === name;
+    if (t === 'bench') {
+      panel.style.display = show ? 'flex' : 'none';
+    } else {
+      panel.style.display = show ? 'flex' : 'none';
+    }
+    tab.classList.toggle('on', show);
+  });
+}
+
+// ══ Input ════════════════════════════════════════════════════
+const inp = document.getElementById('inp');
+inp.addEventListener('input', () => {
+  inp.style.height = 'auto';
+  inp.style.height = Math.min(inp.scrollHeight, 110) + 'px';
+});
+function handleKey(e) {
+  if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+}
+
+// ══ UI Helpers ═══════════════════════════════════════════════
+function setBusy(v) {
+  busy = v;
+  document.getElementById('sbtn').disabled = v;
+  ['dot-s','dot-h'].forEach(id => {
+    document.getElementById(id).className = 'dot ' + (v?'on':'off');
+  });
+  document.getElementById('hstatus').textContent = v ? 'Generating…' : 'Idle';
+}
+function scrollBot() { const el=document.getElementById('msgs'); el.scrollTop=el.scrollHeight; }
+function hideWelcome() { const w=document.getElementById('welcome'); if(w) w.remove(); }
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
+
+// ══ Messages ═════════════════════════════════════════════════
+function addUserMsg(text) {
+  hideWelcome();
+  const g = document.createElement('div'); g.className='mg user';
+  g.innerHTML=`<div class="mg-role"><div class="mlabel">You</div></div>
+    <div class="mg-body"><div class="bubble">${esc(text)}</div></div>`;
+  document.getElementById('msgs').appendChild(g); scrollBot();
+}
+
+function createAsstSlot() {
+  const g = document.createElement('div'); g.className='mg asst';
+  const bid='b'+Date.now(), mid='m'+Date.now();
+  g.innerHTML=`<div class="mg-role"><div class="mlabel">AI</div></div>
+    <div class="mg-body">
+      <div class="bubble" id="${bid}"><span class="cur"></span></div>
+      <div class="bmeta" id="${mid}"></div>
+    </div>`;
+  document.getElementById('msgs').appendChild(g); scrollBot();
+  return { bubble:document.getElementById(bid), meta:document.getElementById(mid) };
+}
+
+// ══ Send ═════════════════════════════════════════════════════
+async function send() {
+  if (busy) return;
+  const text = inp.value.trim(); if(!text) return;
+  inp.value=''; inp.style.height='auto';
+  addUserMsg(text); setBusy(true);
+  const {bubble,meta} = createAsstSlot();
+  let content='', t0=Date.now(), firstTok=null, tokCount=0;
+
+  const payload = {
+    message:        text,
+    session_id:     sessId,
+    system_prompt:  document.getElementById('sysprompt').value,
+    max_new_tokens: parseInt(document.getElementById('p-maxt').value),
+    temperature:    parseFloat(document.getElementById('p-temp').value),
+    top_k:          parseInt(document.getElementById('p-topk').value),
+  };
+
+  try {
+    const resp = await fetch(`${API}/chat`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const reader=resp.body.getReader(), decoder=new TextDecoder();
+    let buf='';
+    while(true) {
+      const {done,value}=await reader.read(); if(done) break;
+      buf+=decoder.decode(value,{stream:true});
+      let nl;
+      while((nl=buf.indexOf('\n'))!==-1) {
+        const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+        if(!line.startsWith('data:')) continue;
+        const raw=line.slice(5).trim(); if(raw==='[DONE]') break;
+        let chunk; try{chunk=JSON.parse(raw);}catch{continue;}
+
+        if(chunk.type==='token'){
+          if(firstTok===null) firstTok=Date.now();
+          content+=chunk.text; tokCount++; totalToks++;
+          document.getElementById('s-totok').textContent=totalToks;
+          document.getElementById('s-toks').textContent=tokCount+' tok';
+          document.getElementById('s-ttft').textContent=(firstTok-t0)+' ms';
+          bubble.innerHTML=esc(content)+'<span class="cur"></span>';
+          scrollBot();
+        } else if(chunk.type==='done') {
+          bubble.innerHTML=esc(content);
+          const ttft=firstTok?(firstTok-t0):0, tps=chunk.tps, ms=chunk.total_ms;
+          meta.innerHTML=`<b>${tps}</b> tok/s · TTFT <b>${ttft}ms</b> · <b>${tokCount}</b> tokens · <b>${ms.toFixed(0)}ms</b>`;
+          document.getElementById('s-tps').textContent=tps+' tok/s';
+          document.getElementById('s-lat').textContent=ms.toFixed(0)+' ms';
+          tpsHist.push(tps); if(tpsHist.length>30) tpsHist.shift();
+          if(tps>peakTps) peakTps=tps;
+          const avg=(tpsHist.reduce((a,b)=>a+b,0)/tpsHist.length).toFixed(1);
+          document.getElementById('s-avg').textContent=avg+' tok/s';
+          document.getElementById('s-peak').textContent=peakTps.toFixed(1)+' tok/s';
+          if(chunk.session_id){
+            fetch(`${API}/chat/history?session_id=${chunk.session_id}`)
+              .then(r=>r.json())
+              .then(d=>{document.getElementById('s-kv').textContent=(d.tokens_in_engine||0)+' tok';})
+              .catch(()=>{});
+          }
+          turns++; document.getElementById('s-turns').textContent=turns;
+          drawSpark();
+        } else if(chunk.type==='error'){
+          bubble.innerHTML+=`<br><span style="color:var(--red)">⚠ ${esc(chunk.message)}</span>`;
+        }
+      }
+    }
+  } catch(err) {
+    if(tokCount===0) bubble.innerHTML=`<span style="color:var(--red)">Connection error: ${esc(err.message)}</span>`;
+    else meta.innerHTML+=` <span style="color:var(--warn)">[interrupted]</span>`;
+  } finally {
+    const c=bubble.querySelector('.cur'); if(c) c.remove();
+    setBusy(false); scrollBot();
+  }
+}
+
+// ══ Sparkline ════════════════════════════════════════════════
+function drawSpark() {
+  const el=document.getElementById('spark'), ctx=el.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  el.width=el.clientWidth*dpr; el.height=el.clientHeight*dpr;
+  ctx.scale(dpr,dpr);
+  const W=el.clientWidth, H=el.clientHeight;
+  ctx.clearRect(0,0,W,H);
+  const d=tpsHist; if(d.length<2) return;
+  const mx=Math.max(...d)*1.15||1, step=W/(d.length-1);
+  const grad=ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,'rgba(124,107,255,.3)'); grad.addColorStop(1,'rgba(124,107,255,.02)');
+  ctx.beginPath();
+  d.forEach((v,i)=>{const x=i*step,y=H-(v/mx)*(H-4)-2;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
+  ctx.strokeStyle='#9d8fff'; ctx.lineWidth=1.5; ctx.stroke();
+  ctx.lineTo((d.length-1)*step,H); ctx.lineTo(0,H); ctx.closePath();
+  ctx.fillStyle=grad; ctx.fill();
+}
+
+// ══ Clear ════════════════════════════════════════════════════
+async function clearChat() {
+  if(busy) return;
+  await fetch(`${API}/chat/reset`,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:sessId})}).catch(()=>{});
+  sessId=crypto.randomUUID();
+  turns=0; totalToks=0; tpsHist=[]; peakTps=0;
+  document.getElementById('msgs').innerHTML=`
+    <div class="welcome" id="welcome">
+      <div class="wlogo">NM</div>
+      <h2>NanoMind Studio</h2>
+      <p>152M GPT-2 · AVX2 + OpenMP · Persistent KV-Cache · GPT-4 Quality Data</p>
+      <div class="chips">
+        <span class="chip">152M params</span><span class="chip">AVX2 SIMD</span>
+        <span class="chip">OpenMP</span><span class="chip">KV Cache</span>
+      </div>
+    </div>`;
+  ['s-turns','s-totok'].forEach(id=>document.getElementById(id).textContent='0');
+  ['s-tps','s-ttft','s-lat','s-avg','s-peak','s-toks','s-kv'].forEach(
+    id=>document.getElementById(id).textContent='—');
+  drawSpark();
+}
+
+// ══ Metrics Poll ═════════════════════════════════════════════
+async function pollMetrics() {
+  try {
+    const r=await fetch(`${API}/metrics`); if(!r.ok) return;
+    const d=await r.json();
+    document.getElementById('s-ram').textContent=
+      d.system_ram_used_pct.toFixed(0)+'% ('+d.process_ram_mb+'MB)';
+    document.getElementById('s-eng').textContent=
+      (d.engines_ready||0)+' / '+(d.n_engines||'?')+' ready';
+    document.getElementById('s-sess').textContent=d.active_sessions||0;
+    document.getElementById('s-up').textContent=fmtUptime(d.uptime_s||0);
+  } catch {}
+}
+function fmtUptime(s){
+  if(s<60) return s+'s';
+  if(s<3600) return Math.floor(s/60)+'m '+(s%60|0)+'s';
+  return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+}
+pollMetrics(); setInterval(pollMetrics, 4000);
+
+// ══ REAL BENCHMARK ══════════════════════════════════════════
+// 5 Phases — each tests something specific
+const PHASES = [
+  {
+    id:    'cold_ttft',
+    title: 'Phase 1 — Cold TTFT',
+    desc:  'First token latency on a fresh session',
+    prompts: ["What is the capital of Japan?"],
+    maxNew: 60, temp: 0.1,
+    metric: 'ttft',
+  },
+  {
+    id:    'warm_ttft',
+    title: 'Phase 2 — Warm TTFT (KV Cache)',
+    desc:  'TTFT on same session — measures KV-cache speedup',
+    prompts: ["Now tell me about Tokyo's population."],
+    maxNew: 60, temp: 0.1,
+    reuseSession: true,   // same session as phase 1
+    metric: 'ttft',
+  },
+  {
+    id:    'throughput',
+    title: 'Phase 3 — Throughput (tok/s)',
+    desc:  '5 prompts, 80 tokens each — avg TPS',
+    prompts: [
+      "Explain machine learning in simple terms.",
+      "Write a Python function to reverse a string.",
+      "What are 3 benefits of regular exercise?",
+      "How does a neural network learn from data?",
+      "Describe the water cycle briefly.",
+    ],
+    maxNew: 80, temp: 0.7,
+    metric: 'tps',
+  },
+  {
+    id:    'long_context',
+    title: 'Phase 4 — Long Context',
+    desc:  'Longer prompt input — tests attention scaling',
+    prompts: [
+      "Please provide a detailed explanation of how transformers work in natural language processing, covering the key components including attention mechanisms, positional encoding, and the encoder-decoder architecture used in models like BERT and GPT.",
+    ],
+    maxNew: 100, temp: 0.5,
+    metric: 'tps',
+  },
+  {
+    id:    'consistency',
+    title: 'Phase 5 — Consistency',
+    desc:  '3 identical prompts — checks TPS variance',
+    prompts: [
+      "What is machine learning?",
+      "What is machine learning?",
+      "What is machine learning?",
+    ],
+    maxNew: 60, temp: 0.1,
+    metric: 'variance',
+  },
+];
+
+let benchRunning = false;
+let coldSessId   = null;  // reused for warm TTFT phase
+
+async function runSinglePrompt(prompt, maxNew, temp, sessionId) {
+  const t0 = Date.now();
+  let firstTok = null, tokCount = 0, finalTps = 0, finalMs = 0;
+
+  const resp = await fetch(`${API}/chat`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      message:        prompt,
+      session_id:     sessionId,
+      system_prompt:  'You are a helpful assistant.',
+      max_new_tokens: maxNew,
+      temperature:    temp,
+      top_k:          40,
+    }),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+  const reader = resp.body.getReader(), decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const {done, value} = await reader.read(); if (done) break;
+    buf += decoder.decode(value, {stream: true});
+    let nl;
+    while ((nl = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl+1);
+      if (!line.startsWith('data:')) continue;
+      const raw = line.slice(5).trim(); if (raw === '[DONE]') break;
+      let chunk; try { chunk = JSON.parse(raw); } catch { continue; }
+      if (chunk.type === 'token') {
+        if (firstTok === null) firstTok = Date.now();
+        tokCount++;
+      } else if (chunk.type === 'done') {
+        finalTps = chunk.tps; finalMs = chunk.total_ms;
+      }
+    }
+  }
+  return {
+    ttft:     firstTok ? (firstTok - t0) : 0,
+    tps:      finalTps,
+    totalMs:  finalMs,
+    tokens:   tokCount,
+  };
+}
+
+function mkPhaseCard(phase) {
+  const div = document.createElement('div');
+  div.className = 'ph-card';
+  div.id = 'ph-' + phase.id;
+  div.innerHTML = `
+    <div class="ph-title">${phase.title}</div>
+    <div class="ph-label">${phase.desc}</div>
+    <div class="ph-running" id="ph-st-${phase.id}">
+      <span class="spin"></span> Running…
+    </div>
+    <div class="ph-bar"><div class="ph-fill" id="ph-bar-${phase.id}"></div></div>`;
+  return div;
+}
+
+function setPhaseResult(phase, results) {
+  const st  = document.getElementById('ph-st-' + phase.id);
+  const bar = document.getElementById('ph-bar-' + phase.id);
+  bar.style.width = '100%';
+
+  if (phase.metric === 'ttft') {
+    const avg = results.reduce((s,r)=>s+r.ttft, 0) / results.length;
+    const cls = avg < 1000 ? 'g' : avg < 2000 ? 'y' : 'r';
+    st.innerHTML = `<div class="ph-stats">
+      <div class="ph-stat"><div class="pv" style="color:var(--${cls})">${avg.toFixed(0)}ms</div><div class="pk">TTFT</div></div>
+      <div class="ph-stat"><div class="pv">${results[0].tokens}</div><div class="pk">tokens</div></div>
+      <div class="ph-stat"><div class="pv">${results[0].tps}</div><div class="pk">tok/s</div></div>
+    </div>`;
+    return { label: 'TTFT', value: avg, unit: 'ms' };
+
+  } else if (phase.metric === 'tps') {
+    const avgTps  = results.reduce((s,r)=>s+r.tps, 0) / results.length;
+    const avgTtft = results.reduce((s,r)=>s+r.ttft, 0) / results.length;
+    const cls = avgTps > 35 ? 'g' : avgTps > 20 ? 'y' : 'r';
+    st.innerHTML = `<div class="ph-stats">
+      ${results.map((r,i)=>`
+        <div class="ph-stat">
+          <div class="pv" style="color:var(--${cls})">${r.tps}</div>
+          <div class="pk">P${i+1} tok/s</div>
+        </div>`).join('')}
+      <div class="ph-stat">
+        <div class="pv" style="color:var(--c)">${avgTtft.toFixed(0)}ms</div>
+        <div class="pk">avg TTFT</div>
+      </div>
+    </div>`;
+    return { label: 'Avg TPS', value: avgTps, unit: 'tok/s' };
+
+  } else if (phase.metric === 'variance') {
+    const tpsList = results.map(r=>r.tps);
+    const avg     = tpsList.reduce((a,b)=>a+b,0)/tpsList.length;
+    const variance= tpsList.reduce((s,v)=>s+Math.pow(v-avg,2),0)/tpsList.length;
+    const stddev  = Math.sqrt(variance).toFixed(1);
+    st.innerHTML = `<div class="ph-stats">
+      ${tpsList.map((t,i)=>`<div class="ph-stat">
+        <div class="pv">${t}</div><div class="pk">run ${i+1}</div>
+      </div>`).join('')}
+      <div class="ph-stat">
+        <div class="pv" style="color:var(--c)">±${stddev}</div>
+        <div class="pk">std dev</div>
+      </div>
+    </div>`;
+    return { label: 'Std Dev', value: parseFloat(stddev), unit: '±' };
+  }
+}
+
+async function runBench() {
+  if (benchRunning || busy) return;
+  benchRunning = true;
+  switchTab('bench');
+
+  const btn   = document.getElementById('btnbench');
+  const scroll = document.getElementById('bench-scroll');
+  btn.disabled = true; btn.textContent = 'Running…';
+
+  const empty = document.getElementById('bench-empty');
+  if (empty) empty.remove();
+  scroll.innerHTML = '';
+
+  coldSessId = crypto.randomUUID();
+  let summaryData = {};
+
+  for (const phase of PHASES) {
+    const card = mkPhaseCard(phase);
+    scroll.appendChild(card);
+    scroll.scrollTop = scroll.scrollHeight;
+
+    const bar = document.getElementById('ph-bar-' + phase.id);
+    const results = [];
+
+    try {
+      for (let i=0; i < phase.prompts.length; i++) {
+        const sid = phase.reuseSession ? coldSessId : crypto.randomUUID();
+        if (phase.id === 'cold_ttft') coldSessId = sid;
+
+        bar.style.width = ((i / phase.prompts.length) * 80) + '%';
+        const r = await runSinglePrompt(phase.prompts[i], phase.maxNew, phase.temp, sid);
+        results.push(r);
+      }
+      const info = setPhaseResult(phase, results);
+      summaryData[phase.id] = info;
+    } catch(e) {
+      document.getElementById('ph-st-' + phase.id).innerHTML =
+        `<span style="color:var(--red)">✗ ${e.message}</span>`;
+      bar.style.background = 'var(--red)'; bar.style.width = '100%';
+    }
+  }
+
+  // Build summary
+  const p3 = summaryData['throughput'];
+  const p1 = summaryData['cold_ttft'];
+  const p2 = summaryData['warm_ttft'];
+
+  const avgTps  = p3 ? p3.value.toFixed(1) : '—';
+  const coldTtft = p1 ? p1.value.toFixed(0) : '—';
+  const warmTtft = p2 ? p2.value.toFixed(0) : '—';
+  const cacheGain = (p1 && p2) ? ((p1.value - p2.value) / p1.value * 100).toFixed(0) : '—';
+
+  const verdict = p3 && p3.value > 35
+    ? `<div class="verdict good">✓ Throughput target met — ${avgTps} tok/s exceeds 35 tok/s baseline</div>`
+    : `<div class="verdict mid">△ Throughput at ${avgTps} tok/s — within expected range</div>`;
+
+  const summary = document.createElement('div');
+  summary.innerHTML = `
+    ${verdict}
+    <div class="b-grid">
+      <div class="b-stat"><div class="bv">${avgTps}</div><div class="bk">Avg tok/s</div></div>
+      <div class="b-stat"><div class="bv">${coldTtft}ms</div><div class="bk">Cold TTFT</div></div>
+      <div class="b-stat"><div class="bv">${warmTtft}ms</div><div class="bk">Warm TTFT</div></div>
+      <div class="b-stat"><div class="bv">${cacheGain}%</div><div class="bk">Cache Speedup</div></div>
+    </div>`;
+  scroll.insertBefore(summary, scroll.firstChild);
+
+  btn.textContent = '↺ Run Again'; btn.disabled = false;
+  benchRunning = false;
+}
+</script>
+</body>
+</html>
