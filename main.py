@@ -1,36 +1,29 @@
 """
-NanoMind — FastAPI Backend v1.4  (Bug-Free)
+NanoMind — FastAPI Backend v1.5
 152M GPT-2 · AVX2 + OpenMP · Persistent KV-Cache
 
-Fixes over v1.3.1:
-  7. CRITICAL: _download_file no longer passes local_dir — downloads to HF
-     cache and copies manually. local_dir_use_symlinks was deprecated and
-     silently ignored in newer huggingface_hub versions, causing the same
-     [Errno 2] cross-device rename failure as before.
-  8. CRITICAL: InferenceEngine.generate now uses a bytearray buffer and
-     enc.decode_bytes() per token instead of enc.decode([id]). GPT-2 is
-     byte-level BPE — a single token can be an incomplete UTF-8 sequence.
-     Decoding token-by-token produced replacement characters (◆) for any
-     non-ASCII text (Chinese, Arabic, accented chars, etc.). The buffer
-     accumulates raw bytes and only yields text once a complete UTF-8
-     codepoint is formed. Any leftover bytes are flushed on DONE.
+Changes over v1.4:
+  1. MAX_GEN_CEILING lowered to 256 (was 500) — MAX_SESSION_TOKENS raised
+     to 744, giving ~50% more history before a context reset triggers.
+  2. MAX_INPUT_CHARS = 2000 guard added — rejects absurdly long messages
+     before they hit the tokenizer and blow the context window.
+  3. SessionData.rebuild_with_sliding_window() — on context overflow, keeps
+     as many recent conversation turns as fit rather than discarding all
+     history. Users no longer experience sudden amnesia mid-conversation.
+  4. CRITICAL: tokens_in_engine is now updated in event_stream's finally
+     block, not after the async-for loop. Previously a client disconnect
+     (CancelledError) skipped the update entirely, leaving a stale count
+     that caused premature or missed context resets on subsequent turns.
+  5. tokens_generated is incremented on every TOKEN chunk so the finally
+     block has an accurate partial count even on mid-stream disconnects.
+  6. STOP_STRINGS matching now also catches patterns without a leading
+     space (e.g. "\\nUser:" and "\\n User:"), reducing role-bleed leakage.
 
-Fixes over v1.2 / v1.3:
-  1. CRITICAL: stopped_early no longer breaks the generate loop —
-     remaining tokens are silently consumed so the pipe stays clean.
-  2. stopped_early TPS calculated from actual encoded token count.
-  3. shutil import moved to top level.
-  4. session_gc_loop: _metrics_lock None-guard added.
-  5. pool.reset_session: _map_lock None-guard added.
-  6. (v1.3) local_dir_use_symlinks=False passed to hf_hub_download
-     (superseded by fix #7 above).
-
-Speed Mode (default — single user, max throughput):
-  N_ENGINES=1  OMP_NUM_THREADS=2
-  → Both vCPU cores for one engine → target 40+ tok/s
-Multi-User Mode:
-  N_ENGINES=4  OMP_NUM_THREADS=1
-  → 4 parallel users ~35 tok/s each
+Fixes carried forward from v1.4:
+  7. _download_file no longer passes local_dir — downloads to HF cache
+     and copies manually to avoid cross-device rename failures.
+  8. Byte-level UTF-8 buffer in InferenceEngine.generate for correct
+     multi-byte character decoding (no more ◆ replacement chars).
 """
 import asyncio
 import json
@@ -63,10 +56,14 @@ USER_TOKEN   = "User:"
 ASST_TOKEN   = "Assistant:"
 SEP          = "\n"
 
-BLOCK_SIZE         = 1024
-MAX_GEN_CEILING    = 500
-SAFETY_MARGIN      = 24
-MAX_SESSION_TOKENS = BLOCK_SIZE - MAX_GEN_CEILING - SAFETY_MARGIN  # 500
+BLOCK_SIZE      = 1024
+MAX_GEN_CEILING = 256   # lowered from 500 — frees 244 extra history tokens
+SAFETY_MARGIN   = 24
+# 1024 - 256 - 24 = 744  (was 500 with old ceiling)
+MAX_SESSION_TOKENS = BLOCK_SIZE - MAX_GEN_CEILING - SAFETY_MARGIN
+
+# Hard cap on raw input characters — rejects giant pastes before tokenising
+MAX_INPUT_CHARS = 2000
 
 N_ENGINES      = int(os.environ.get("N_ENGINES",      "1"))
 OMP_PER_ENGINE = int(os.environ.get("OMP_NUM_THREADS", "2"))
@@ -174,10 +171,9 @@ class InferenceEngine:
         self._proc.stdin.write(cmd.encode())
         await self._proc.stdin.drain()
 
-        # ── FIX #8: byte-level buffer for correct multi-byte UTF-8 decoding ──
-        # GPT-2 BPE tokens can be partial UTF-8 byte sequences. Decoding each
-        # token individually produces replacement chars (◆) for non-ASCII text.
-        # Accumulate raw bytes; yield only when a complete codepoint is ready.
+        # Byte-level buffer for correct multi-byte UTF-8 decoding.
+        # GPT-2 BPE tokens can be partial UTF-8 byte sequences — decoding
+        # each token individually produces replacement chars for non-ASCII.
         byte_buffer = bytearray()
 
         try:
@@ -197,18 +193,12 @@ class InferenceEngine:
                     parts    = line.split()
                     token_id = int(parts[1])
                     elapsed  = float(parts[2])
-
-                    # Accumulate raw bytes for this token
                     byte_buffer.extend(enc.decode_bytes([token_id]))
-
-                    # Flush all complete UTF-8 codepoints from the buffer
                     try:
                         decoded_text = byte_buffer.decode("utf-8")
                         byte_buffer.clear()
                     except UnicodeDecodeError:
-                        # Incomplete multi-byte sequence — wait for next token
                         continue
-
                     if decoded_text:
                         yield {
                             "type":       "token",
@@ -218,7 +208,6 @@ class InferenceEngine:
                         }
 
                 elif line.startswith("DONE"):
-                    # Flush any leftover bytes (best-effort, errors replaced)
                     if byte_buffer:
                         leftover = byte_buffer.decode("utf-8", errors="replace")
                         byte_buffer.clear()
@@ -229,7 +218,6 @@ class InferenceEngine:
                                 "text":       leftover,
                                 "elapsed_ms": 0.0,
                             }
-
                     parts    = line.split()
                     total_t  = int(parts[1])
                     total_ms = float(parts[2])
@@ -248,7 +236,6 @@ class InferenceEngine:
                     return
 
         except asyncio.CancelledError:
-            # Client disconnected — drain pipe so it stays clean for next request
             try:
                 async with asyncio.timeout(5):
                     while True:
@@ -314,7 +301,6 @@ class EnginePool:
                 yield chunk
 
     async def reset_session(self, session_id: str):
-        # Guard: pool may not be initialized yet
         if self._map_lock is None:
             return
         async with self._map_lock:
@@ -364,6 +350,7 @@ class SessionData:
         self.history.append({"role": "assistant", "content": content})
 
     def new_turn_tokens(self, user_msg: str) -> list[int]:
+        """Tokens for a normal (non-overflow) turn."""
         if self.tokens_in_engine == 0:
             text = (
                 f"{SYSTEM_TOKEN} {self.system_prompt}{SEP}"
@@ -372,6 +359,34 @@ class SessionData:
         else:
             text = f"{USER_TOKEN} {user_msg}{SEP}{ASST_TOKEN} "
         return enc.encode_ordinary(text)
+
+    def rebuild_with_sliding_window(self, user_msg: str, token_budget: int) -> list[int]:
+        """
+        Rebuild a full prompt that fits within token_budget.
+        Called after a context overflow reset.
+        Packs: system prompt + as many recent history turns as fit
+               (most-recent-first selection) + current user message.
+        This replaces the v1.4 behaviour of discarding all history on reset,
+        which caused sudden conversation amnesia for multi-turn sessions.
+        """
+        prefix = enc.encode_ordinary(f"{SYSTEM_TOKEN} {self.system_prompt}{SEP}")
+        suffix = enc.encode_ordinary(f"{USER_TOKEN} {user_msg}{SEP}{ASST_TOKEN} ")
+        budget = token_budget - len(prefix) - len(suffix)
+
+        selected: list[list[int]] = []
+        for turn in reversed(self.history):
+            role  = USER_TOKEN if turn["role"] == "user" else ASST_TOKEN
+            chunk = enc.encode_ordinary(f"{role} {turn['content']}{SEP}")
+            if len(chunk) > budget:
+                break
+            selected.insert(0, chunk)
+            budget -= len(chunk)
+
+        tokens: list[int] = prefix[:]
+        for chunk in selected:
+            tokens += chunk
+        tokens += suffix
+        return tokens
 
 
 sessions: dict[str, SessionData] = {}
@@ -405,7 +420,7 @@ def get_total_ram_mb() -> float:
 async def session_gc_loop():
     while True:
         await asyncio.sleep(300)
-        if _metrics_lock is None:   # lifespan not ready yet
+        if _metrics_lock is None:
             continue
         now     = time.monotonic()
         expired = [
@@ -423,38 +438,24 @@ async def session_gc_loop():
 
 def _download_file(repo_id: str, filename: str, dest_dir: Path) -> None:
     """Blocking HF download — runs in a thread executor.
-
-    Fix (v1.4): Do NOT pass local_dir to hf_hub_download.
-    Newer versions of huggingface_hub silently ignore local_dir_use_symlinks,
-    use a /tmp staging path on a different filesystem, and then fail with
-    [Errno 2] on the cross-device os.rename(). Instead we let HF download
-    to its own cache (always on the same filesystem) and then do a
-    straightforward shutil.copy2() to the destination. This is always safe
-    regardless of huggingface_hub version.
+    Downloads to HF cache (same filesystem), then shutil.copy2() to dest.
+    Avoids the cross-device os.rename() failure from passing local_dir
+    directly to hf_hub_download in newer huggingface_hub versions.
     """
     dest = dest_dir / filename
     print(f"[HF HUB] Downloading {filename} from {repo_id} …")
-
-    # Download to HF cache — no local_dir, no symlink issues
-    cached = Path(hf_hub_download(
-        repo_id=repo_id,
-        filename=filename,
-    ))
-
+    cached = Path(hf_hub_download(repo_id=repo_id, filename=filename))
     if not cached.exists():
         raise FileNotFoundError(
             f"hf_hub_download returned a path that does not exist: {cached}"
         )
-
     print(f"[HF HUB] Copying {filename} → {dest}")
     shutil.copy2(cached, dest)
-
     if not dest.exists():
         raise FileNotFoundError(
             f"Copy appeared to succeed but {dest} is missing. "
             "Possible causes: disk full, /app not writable."
         )
-
     size_mb = dest.stat().st_size // 1_000_000
     print(f"[HF HUB] {filename} ready ({size_mb} MB)")
 
@@ -462,7 +463,6 @@ def _download_file(repo_id: str, filename: str, dest_dir: Path) -> None:
 async def _startup_background():
     loop = asyncio.get_running_loop()
 
-    # ── model.bin ──────────────────────────────────────────────────────
     if MODEL_BIN.exists():
         print(f"[startup] model.bin present "
               f"({MODEL_BIN.stat().st_size // 1_000_000} MB) — skip download")
@@ -475,7 +475,6 @@ async def _startup_background():
             print(f"[ERROR] model.bin download failed: {e}")
             return
 
-    # ── tokenizer.bin ──────────────────────────────────────────────────
     if TOKENIZER_BIN.exists():
         print("[startup] tokenizer.bin present — skip download")
     else:
@@ -487,7 +486,6 @@ async def _startup_background():
             print(f"[ERROR] tokenizer.bin download failed: {e}")
             return
 
-    # ── Sanity check ───────────────────────────────────────────────────
     if not MODEL_BIN.exists():
         print("[ERROR] model.bin missing after download — aborting pool start")
         return
@@ -515,7 +513,7 @@ async def lifespan(app: FastAPI):
     await pool.stop()
 
 
-app = FastAPI(title="NanoMind", version="1.4", lifespan=lifespan)
+app = FastAPI(title="NanoMind", version="1.5", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -528,7 +526,7 @@ class ChatRequest(BaseModel):
     message:        str
     session_id:     str   = Field(default_factory=lambda: str(uuid.uuid4()))
     system_prompt:  str   = "You are a helpful, thoughtful, and articulate AI assistant."
-    max_new_tokens: int   = Field(default=200, ge=1,    le=500)
+    max_new_tokens: int   = Field(default=200, ge=1,    le=MAX_GEN_CEILING)
     temperature:    float = Field(default=0.7,  ge=0.01, le=2.0)
     top_k:          int   = Field(default=40,   ge=1,    le=200)
 
@@ -581,6 +579,14 @@ async def chat(req: ChatRequest):
     if not any(e._ready for e in pool.engines):
         raise HTTPException(503, "Engine loading… retry in ~30s")
 
+    # ── Input length guard ────────────────────────────────────────────────
+    if len(req.message) > MAX_INPUT_CHARS:
+        raise HTTPException(
+            400,
+            f"Message too long ({len(req.message)} chars). "
+            f"Maximum is {MAX_INPUT_CHARS} characters."
+        )
+
     sess = sessions.get(req.session_id)
     if sess is None:
         sess = SessionData(req.system_prompt)
@@ -589,22 +595,26 @@ async def chat(req: ChatRequest):
     sess.touch()
     new_tokens = sess.new_turn_tokens(req.message)
 
-    # Context window overflow — reset and rebuild prompt from scratch
+    # ── Context window overflow — sliding window rebuild ──────────────────
+    # v1.4: hard reset discarded all history (conversation amnesia).
+    # v1.5: rebuild keeps as many recent turns as fit in the budget.
     if sess.tokens_in_engine + len(new_tokens) + req.max_new_tokens \
             > MAX_SESSION_TOKENS:
         await pool.reset_session(req.session_id)
         sess.tokens_in_engine = 0
-        new_tokens = sess.new_turn_tokens(req.message)
+        budget     = MAX_SESSION_TOKENS - req.max_new_tokens
+        new_tokens = sess.rebuild_with_sliding_window(req.message, budget)
 
     sess.append_user(req.message)
     async with _metrics_lock:
         metrics["total_requests"] += 1
 
     async def event_stream():
-        parts:        list[str] = []
-        t0            = time.perf_counter()
-        stopped_early = False   # role-bleed detected
-        final_chunk   = None    # stores the DONE chunk from C++ engine
+        parts:            list[str] = []
+        t0              = time.perf_counter()
+        stopped_early   = False
+        final_chunk     = None
+        tokens_generated = 0   # tracked throughout — used in finally even on disconnect
 
         try:
             async for chunk in pool.generate(
@@ -612,51 +622,51 @@ async def chat(req: ChatRequest):
                 req.max_new_tokens, req.temperature, req.top_k,
             ):
                 if chunk["type"] == "token":
-                    # ── KEY FIX: NEVER break here. Always consume the full
-                    # generate loop until DONE. Breaking early leaves unread
-                    # data in the pipe and corrupts the next request.
+                    # Count every token regardless of stopped_early so the
+                    # finally block has an accurate partial count on disconnect.
+                    tokens_generated += 1
                     if not stopped_early:
                         parts.append(chunk["text"])
                         joined = "".join(parts)
                         for s in STOP_STRINGS:
-                            idx = joined.find(f"\n{s}")
-                            if idx != -1:
-                                parts         = [joined[:idx]]
-                                stopped_early = True
+                            # Match both "\nUser:" and "\n User:" (no leading space)
+                            for pattern in (f"\n{s}", f"\n {s}"):
+                                idx = joined.find(pattern)
+                                if idx != -1:
+                                    parts         = [joined[:idx]]
+                                    stopped_early = True
+                                    break
+                            if stopped_early:
                                 break
                         if not stopped_early:
                             yield f"data: {json.dumps(chunk)}\n\n"
-                    # If stopped_early: silently consume remaining tokens
-                    # until the engine sends DONE — pipe stays clean
+                    # stopped_early: silently consume remaining tokens until DONE
 
                 elif chunk["type"] == "done":
-                    final_chunk = chunk
-                    # Do NOT yield yet — send unified done event below
+                    final_chunk      = chunk
+                    tokens_generated = chunk["total_tokens"]  # authoritative count
 
                 elif chunk["type"] == "error":
                     async with _metrics_lock:
                         metrics["errors"] += 1
                     yield f"data: {json.dumps(chunk)}\n\n"
 
-            # ── Build and send the final done event ───────────────────────
+            # ── Normal completion path ────────────────────────────────────
             reply   = "".join(parts).strip()
             elapsed = (time.perf_counter() - t0) * 1000
 
             if final_chunk is not None and not stopped_early:
-                # Normal path: use C++ reported numbers (most accurate)
                 tok_out  = final_chunk["total_tokens"]
                 total_ms = final_chunk["total_ms"]
                 tps      = final_chunk["tps"]
             else:
-                # stopped_early or no DONE: calculate from reply text
                 tok_out  = len(enc.encode_ordinary(reply)) if reply else 0
                 total_ms = round(elapsed, 2)
                 tps      = round(tok_out / (total_ms / 1000.0), 2) \
                            if total_ms > 0 else 0
+                tokens_generated = tok_out
 
             sess.append_assistant(reply)
-            sess.tokens_in_engine += len(new_tokens) + tok_out
-
             async with _metrics_lock:
                 metrics["total_tokens"] += tok_out
                 metrics["total_ms"]     += elapsed
@@ -675,7 +685,12 @@ async def chat(req: ChatRequest):
             async with _metrics_lock:
                 metrics["errors"] += 1
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
         finally:
+            # Always update token count — runs even on CancelledError (client disconnect).
+            # v1.4 updated tokens_in_engine after the async-for loop, which was
+            # skipped entirely on disconnect, leaving a permanently stale count.
+            sess.tokens_in_engine += len(new_tokens) + tokens_generated
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
