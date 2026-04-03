@@ -9,8 +9,8 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV HF_REPO_ID=NOT-OMEGA/NanoMind
-ENV N_ENGINES=1
-ENV OMP_NUM_THREADS=2
+ENV N_ENGINES=2
+ENV OMP_NUM_THREADS=1
 
 RUN apt-get update && apt-get install -y \
     python3.11 \
