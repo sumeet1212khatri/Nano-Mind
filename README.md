@@ -14,9 +14,12 @@
 <img width="247" height="199" alt="image" src="https://github.com/user-attachments/assets/e87eda99-48b1-4eb1-99ea-52b0cd462aeb" />
 
 
-## HHD
+## SYSTEM DESIGN
 
-<img width="1523" height="836" alt="image" src="https://github.com/user-attachments/assets/a1d718eb-0dbf-46f6-935d-769a40bc68bc" />
+[HHD Design](https://app.eraser.io/workspace/RMsX2vhTVpB6uaZgnBqV?origin=share)
+
+<img width="1648" height="841" alt="image" src="https://github.com/user-attachments/assets/396dac9c-4256-48d7-808b-8fc4718df27a" />
+
 
 
 ## ✨ Key Features
