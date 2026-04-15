@@ -107,3 +107,4 @@ def test_mlp_expansion():
     # MLP hidden dim = 4 × n_embd (standard GPT-2)
     n_embd = 768
     assert 4 * n_embd == 3072
+    
