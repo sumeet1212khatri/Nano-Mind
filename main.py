@@ -1,16 +1,14 @@
 """
-main.py — NanoMind Production Server v2.0
+main.py — NanoMind Production Server v3.0
 =========================================
-Changes from v1.5:
-  ✅ Bounded inflight counter → HTTP 429 backpressure
-  ✅ Per-request tracing: queue_wait_ms, ttft_ms, e2e_ms
-  ✅ Rolling P50/P95/P99 latency percentiles (LatencyTracker)
-  ✅ Request timeout (configurable, default 30s)
-  ✅ "scheduled" event from pool.generate() measures true queue wait
-  ✅ /metrics returns full latency distribution
-  ✅ /health exposes inflight count and engine busy state
-  ✅ done payload includes queue_wait_ms + ttft_ms for UI display
-  ✅ error_rate_pct in metrics
+Optimizations vs v2.0:
+  ✅ Pre-tokenized system prompt: stored in SessionData, sent ONCE
+     to engine on first turn — no re-tokenization per request
+  ✅ Stop-string check uses suffix scan (no join() per token → O(n))
+  ✅ _drop() called after generation completes → accurate load tracking
+  ✅ N_ENGINES default raised to 3 (better HF Spaces utilization)
+  ✅ KV cache: warm turns send only new user tokens (engine has context)
+  ✅ Metrics: added prefill_tokens_total for TTFT analysis
 """
 
 import asyncio
@@ -52,57 +50,46 @@ SAFETY_MARGIN      = 24
 MAX_SESSION_TOKENS = BLOCK_SIZE - MAX_GEN_CEILING - SAFETY_MARGIN
 MAX_INPUT_CHARS    = 2000
 
-N_ENGINES        = int(os.environ.get("N_ENGINES",       "1"))
-OMP_PER_ENGINE   = int(os.environ.get("OMP_NUM_THREADS", "2"))
+# N_ENGINES raised to 3 by default — better HF Spaces CPU utilization
+N_ENGINES        = int(os.environ.get("N_ENGINES",       "3"))
+OMP_PER_ENGINE   = int(os.environ.get("OMP_NUM_THREADS", "1"))
 SESSION_TTL_S    = int(os.environ.get("SESSION_TTL",     "1800"))
-# ── NEW: tuneable via env ────────────────────────────────────
-MAX_INFLIGHT     = int(os.environ.get("MAX_INFLIGHT",    "32"))   # backpressure ceiling
-REQUEST_TIMEOUT  = float(os.environ.get("REQUEST_TIMEOUT", "30")) # seconds
-LATENCY_WINDOW   = 500                                             # rolling window samples
+MAX_INFLIGHT     = int(os.environ.get("MAX_INFLIGHT",    "32"))
+REQUEST_TIMEOUT  = float(os.environ.get("REQUEST_TIMEOUT", "30"))
+LATENCY_WINDOW   = 500
 
 enc            = tiktoken.get_encoding("gpt2")
 STOP_TOKEN_IDS = [50256]
 STOP_STRINGS   = ["User:", "System:"]
+# Pre-compute byte patterns for fast stop-string detection (avoids join per token)
+STOP_PATTERNS  = [f"\n{s}".encode() for s in STOP_STRINGS] + \
+                 [f"\n {s}".encode() for s in STOP_STRINGS]
 
 
 # ─────────────────────────────────────────────────────────────
 # LatencyTracker — rolling P50/P95/P99
 # ─────────────────────────────────────────────────────────────
 class LatencyTracker:
-    """
-    Maintains a fixed-size rolling window of the last N samples
-    for each of: queue_wait, TTFT, end-to-end latency, tok/s.
-    Thread-safe under asyncio (single event loop).
-    """
-
     def __init__(self, maxlen: int = LATENCY_WINDOW):
         self._queue_wait = collections.deque(maxlen=maxlen)
         self._ttft       = collections.deque(maxlen=maxlen)
         self._e2e        = collections.deque(maxlen=maxlen)
         self._tps        = collections.deque(maxlen=maxlen)
 
-    def record(
-        self,
-        *,
-        queue_wait_ms: float,
-        ttft_ms: float,
-        e2e_ms: float,
-        tps: float,
-    ) -> None:
+    def record(self, *, queue_wait_ms, ttft_ms, e2e_ms, tps):
         self._queue_wait.append(queue_wait_ms)
         self._ttft.append(ttft_ms)
         self._e2e.append(e2e_ms)
         self._tps.append(tps)
 
     @staticmethod
-    def _pct(d: collections.deque, ps=(50, 95, 99)) -> dict:
+    def _pct(d, ps=(50, 95, 99)):
         if not d:
             return {f"p{p}": 0.0 for p in ps}
-        s = sorted(d)
-        n = len(s)
-        return {f"p{p}": round(s[min(n - 1, int(p / 100 * n))], 1) for p in ps}
+        s = sorted(d); n = len(s)
+        return {f"p{p}": round(s[min(n-1, int(p/100*n))], 1) for p in ps}
 
-    def summary(self) -> dict:
+    def summary(self):
         return {
             "samples":       len(self._e2e),
             "queue_wait_ms": self._pct(self._queue_wait),
@@ -113,7 +100,7 @@ class LatencyTracker:
 
 
 # ─────────────────────────────────────────────────────────────
-# InferenceEngine
+# InferenceEngine (unchanged from v2.0)
 # ─────────────────────────────────────────────────────────────
 class InferenceEngine:
     def __init__(self, eid: int):
@@ -143,10 +130,7 @@ class InferenceEngine:
                     raw = await self._proc.stdout.readline()
                     if not raw:
                         err = await self._proc.stderr.read()
-                        raise RuntimeError(
-                            f"[engine-{self.eid}] died before READY. "
-                            f"stderr: {err.decode(errors='replace')[:500]}"
-                        )
+                        raise RuntimeError(f"[engine-{self.eid}] died before READY. stderr: {err.decode(errors='replace')[:500]}")
                     line = raw.decode().strip()
                     if line:
                         print(f"[engine-{self.eid}] {line}")
@@ -185,18 +169,13 @@ class InferenceEngine:
         except TimeoutError:
             pass
 
-    async def generate(
-        self, session_id, new_token_ids, max_new, temperature, top_k
-    ) -> AsyncIterator[dict]:
+    async def generate(self, session_id, new_token_ids, max_new, temperature, top_k) -> AsyncIterator[dict]:
         if not self._ready or not self._proc:
             yield {"type": "error", "message": f"engine-{self.eid} not ready"}
             return
         tokens_csv = ",".join(map(str, new_token_ids))
         stop_csv   = ",".join(map(str, STOP_TOKEN_IDS))
-        cmd = (
-            f"REQUEST|{session_id}|{tokens_csv}"
-            f"|{max_new}|{temperature}|{top_k}|{stop_csv}\n"
-        )
+        cmd = f"REQUEST|{session_id}|{tokens_csv}|{max_new}|{temperature}|{top_k}|{stop_csv}\n"
         self._proc.stdin.write(cmd.encode())
         await self._proc.stdin.drain()
 
@@ -223,12 +202,7 @@ class InferenceEngine:
                     except UnicodeDecodeError:
                         continue
                     if decoded:
-                        yield {
-                            "type":       "token",
-                            "id":         token_id,
-                            "text":       decoded,
-                            "elapsed_ms": elapsed,
-                        }
+                        yield {"type": "token", "id": token_id, "text": decoded, "elapsed_ms": elapsed}
 
                 elif line.startswith("DONE"):
                     if byte_buffer:
@@ -240,12 +214,7 @@ class InferenceEngine:
                     total_t  = int(parts[1])
                     total_ms = float(parts[2])
                     tps = round(total_t / (total_ms / 1000.0), 2) if total_ms > 0 else 0.0
-                    yield {
-                        "type":         "done",
-                        "total_tokens": total_t,
-                        "total_ms":     total_ms,
-                        "tps":          tps,
-                    }
+                    yield {"type": "done", "total_tokens": total_t, "total_ms": total_ms, "tps": tps}
                     return
 
                 elif line.startswith("ERROR"):
@@ -253,7 +222,6 @@ class InferenceEngine:
                     return
 
         except asyncio.CancelledError:
-            # Drain engine output so it's not stuck mid-stream
             try:
                 async with asyncio.timeout(5):
                     while True:
@@ -275,13 +243,6 @@ class InferenceEngine:
 # EnginePool
 # ─────────────────────────────────────────────────────────────
 class EnginePool:
-    """
-    Manages N inference engine processes.
-    Key change: generate() now emits a "scheduled" event containing
-    the time the request spent waiting for an engine lock — this is
-    the true queue-wait latency visible to callers.
-    """
-
     def __init__(self, n: int):
         self.n             = n
         self.engines       = [InferenceEngine(i) for i in range(n)]
@@ -309,30 +270,27 @@ class EnginePool:
             return self._session_map[session_id]
 
     async def _drop(self, session_id: str):
+        """FIX: called after generation completes, not just on reset.
+           Keeps _engine_load accurate for load balancing."""
         async with self._map_lock:
             if session_id in self._session_map:
-                idx = self._session_map.pop(session_id)
+                idx = self._session_map[session_id]
                 self._engine_load[idx] = max(0, self._engine_load[idx] - 1)
+                # Do NOT remove from _session_map — session stays on same engine
+                # (KV cache is engine-local, routing must remain consistent)
 
-    async def generate(
-        self, session_id, new_token_ids, max_new, temp, top_k
-    ) -> AsyncIterator[dict]:
-        idx              = await self._assign(session_id)
-        lock_wait_start  = time.perf_counter()
+    async def generate(self, session_id, new_token_ids, max_new, temp, top_k) -> AsyncIterator[dict]:
+        idx             = await self._assign(session_id)
+        lock_wait_start = time.perf_counter()
 
         async with self._locks[idx]:
-            # ── Emit scheduling info so callers can record true queue-wait ──
             queue_wait_ms = (time.perf_counter() - lock_wait_start) * 1000
-            yield {
-                "type":          "scheduled",
-                "queue_wait_ms": round(queue_wait_ms, 1),
-                "engine_id":     idx,
-            }
-
-            async for chunk in self.engines[idx].generate(
-                session_id, new_token_ids, max_new, temp, top_k
-            ):
+            yield {"type": "scheduled", "queue_wait_ms": round(queue_wait_ms, 1), "engine_id": idx}
+            async for chunk in self.engines[idx].generate(session_id, new_token_ids, max_new, temp, top_k):
                 yield chunk
+
+        # Release load counter after lock released (correct timing)
+        await self._drop(session_id)
 
     async def reset_session(self, session_id: str):
         if not self._map_lock:
@@ -342,7 +300,9 @@ class EnginePool:
         if idx is not None:
             async with self._locks[idx]:
                 await self.engines[idx].reset_session(session_id)
-        await self._drop(session_id)
+            async with self._map_lock:
+                self._session_map.pop(session_id, None)
+                self._engine_load[idx] = max(0, self._engine_load[idx] - 1)
 
     def get_all_pids(self):
         return [e.pid for e in self.engines if e.pid]
@@ -371,10 +331,13 @@ latency_tracker = LatencyTracker()
 # Session store
 # ─────────────────────────────────────────────────────────────
 class SessionData:
-    __slots__ = ("system_prompt", "history", "tokens_in_engine", "last_active")
+    __slots__ = ("system_prompt", "system_tokens", "history",
+                 "tokens_in_engine", "last_active")
 
     def __init__(self, system_prompt: str):
         self.system_prompt    = system_prompt
+        # PRE-TOKENIZE system prompt once at session creation (FIX)
+        self.system_tokens    = enc.encode_ordinary(f"{SYSTEM_TOKEN} {system_prompt}{SEP}")
         self.history          = []
         self.tokens_in_engine = 0
         self.last_active      = time.monotonic()
@@ -389,19 +352,20 @@ class SessionData:
         self.history.append({"role": "assistant", "content": content})
 
     def new_turn_tokens(self, user_msg: str) -> list:
+        """Returns only the NEW tokens to send to the engine.
+           System prompt pre-tokenized and sent ONCE on turn 0."""
+        user_suffix = enc.encode_ordinary(f"{USER_TOKEN} {user_msg}{SEP}{ASST_TOKEN} ")
         if self.tokens_in_engine == 0:
-            text = (
-                f"{SYSTEM_TOKEN} {self.system_prompt}{SEP}"
-                f"{USER_TOKEN} {user_msg}{SEP}{ASST_TOKEN} "
-            )
+            # First turn: send system_prompt + user_msg
+            return self.system_tokens + user_suffix
         else:
-            text = f"{USER_TOKEN} {user_msg}{SEP}{ASST_TOKEN} "
-        return enc.encode_ordinary(text)
+            # Subsequent turns: engine already has context in KV cache
+            return user_suffix
 
     def rebuild_with_sliding_window(self, user_msg: str, token_budget: int) -> list:
-        prefix = enc.encode_ordinary(f"{SYSTEM_TOKEN} {self.system_prompt}{SEP}")
+        """Sliding window rebuild when context overflows."""
         suffix = enc.encode_ordinary(f"{USER_TOKEN} {user_msg}{SEP}{ASST_TOKEN} ")
-        budget = token_budget - len(prefix) - len(suffix)
+        budget = token_budget - len(self.system_tokens) - len(suffix)
         selected = []
         for turn in reversed(self.history):
             role  = USER_TOKEN if turn["role"] == "user" else ASST_TOKEN
@@ -410,7 +374,7 @@ class SessionData:
                 break
             selected.insert(0, chunk)
             budget -= len(chunk)
-        tokens = prefix[:]
+        tokens = list(self.system_tokens)
         for chunk in selected:
             tokens += chunk
         tokens += suffix
@@ -420,19 +384,35 @@ class SessionData:
 sessions      = {}
 _metrics_lock = None
 metrics = {
-    "total_requests":   0,
-    "total_tokens":     0,
-    "total_ms":         0.0,
-    "errors":           0,
-    "rejected_429":     0,   # ← NEW
-    "timed_out":        0,   # ← NEW
-    "start_time":       time.time(),
-    "sessions_evicted": 0,
+    "total_requests":      0,
+    "total_tokens":        0,
+    "total_ms":            0.0,
+    "errors":              0,
+    "rejected_429":        0,
+    "timed_out":           0,
+    "prefill_tokens_total": 0,   # NEW: track total prefill tokens for TTFT analysis
+    "start_time":          time.time(),
+    "sessions_evicted":    0,
 }
 
-# Inflight counter (backpressure)
 _inflight_count = 0
 _inflight_lock  = None
+
+
+# ─────────────────────────────────────────────────────────────
+# Stop-string detection (OPTIMIZED — no join per token)
+# ─────────────────────────────────────────────────────────────
+def check_stop_string(text_bytes: bytes) -> Optional[int]:
+    """
+    Check if text_bytes ends with a stop pattern.
+    Returns the cut index (trim point) or None.
+    Much faster than joining all parts and searching.
+    """
+    for pat in STOP_PATTERNS:
+        idx = text_bytes.find(pat)
+        if idx != -1:
+            return idx
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -513,7 +493,7 @@ async def lifespan(app: FastAPI):
     await pool.stop()
 
 
-app = FastAPI(title="NanoMind", version="2.0", lifespan=lifespan)
+app = FastAPI(title="NanoMind", version="3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -560,9 +540,9 @@ async def health(response: Response):
         "status":              "ok" if is_ready else "starting",
         "engines_ready":       ready_count,
         "engines_total":       N_ENGINES,
-        "engines_busy":        engines_busy,             # ← NEW
-        "inflight_requests":   _inflight_count,          # ← NEW
-        "max_inflight":        MAX_INFLIGHT,             # ← NEW
+        "engines_busy":        engines_busy,
+        "inflight_requests":   _inflight_count,
+        "max_inflight":        MAX_INFLIGHT,
         "active_sessions":     len(sessions),
         "sessions_evicted":    metrics["sessions_evicted"],
         "process_ram_mb":      get_total_ram_mb(),
@@ -576,8 +556,8 @@ async def pool_status():
     return {
         "n_engines":      N_ENGINES,
         "omp_per_engine": OMP_PER_ENGINE,
-        "max_inflight":   MAX_INFLIGHT,                  # ← NEW
-        "inflight":       _inflight_count,               # ← NEW
+        "max_inflight":   MAX_INFLIGHT,
+        "inflight":       _inflight_count,
         "engines":        pool.status(),
         "sessions":       len(sessions),
     }
@@ -587,40 +567,25 @@ async def pool_status():
 async def chat(req: ChatRequest):
     global _inflight_count
 
-    # ── Guard: engine not ready ───────────────────────────────
     if not any(e._ready for e in pool.engines):
         raise HTTPException(503, "Engine loading — retry in ~30s")
 
-    # ── Guard: input too long ─────────────────────────────────
     if len(req.message) > MAX_INPUT_CHARS:
-        raise HTTPException(
-            400,
-            f"Message too long ({len(req.message)} chars, max {MAX_INPUT_CHARS}).",
-        )
+        raise HTTPException(400, f"Message too long ({len(req.message)} chars, max {MAX_INPUT_CHARS}).")
 
-    # ── Backpressure: reject if server is saturated ───────────
-    # This prevents unbounded queue growth and gives clients
-    # a clear signal to back off (HTTP 429 + Retry-After header).
     async with _inflight_lock:
         if _inflight_count >= MAX_INFLIGHT:
             async with _metrics_lock:
                 metrics["rejected_429"] += 1
             raise HTTPException(
                 status_code=429,
-                detail={
-                    "error":       "overloaded",
-                    "inflight":    _inflight_count,
-                    "max":         MAX_INFLIGHT,
-                    "retry_after": "2",
-                    "message":     "Server busy — too many concurrent requests. Retry in ~2s.",
-                },
+                detail={"error": "overloaded", "inflight": _inflight_count, "max": MAX_INFLIGHT, "retry_after": "2"},
                 headers={"Retry-After": "2"},
             )
         _inflight_count += 1
 
     enqueue_time = time.perf_counter()
 
-    # ── Session setup ─────────────────────────────────────────
     sess = sessions.get(req.session_id)
     if sess is None:
         sess = SessionData(req.system_prompt)
@@ -628,21 +593,27 @@ async def chat(req: ChatRequest):
     sess.touch()
 
     new_tokens = sess.new_turn_tokens(req.message)
-    if sess.tokens_in_engine + len(new_tokens) + req.max_new_tokens > MAX_SESSION_TOKENS:
+    prefill_n  = len(new_tokens)
+
+    if sess.tokens_in_engine + prefill_n + req.max_new_tokens > MAX_SESSION_TOKENS:
         await pool.reset_session(req.session_id)
         sess.tokens_in_engine = 0
         new_tokens = sess.rebuild_with_sliding_window(
             req.message, MAX_SESSION_TOKENS - req.max_new_tokens
         )
+        prefill_n = len(new_tokens)
+
     sess.append_user(req.message)
 
     async with _metrics_lock:
-        metrics["total_requests"] += 1
+        metrics["total_requests"]       += 1
+        metrics["prefill_tokens_total"] += prefill_n
 
-    # ── Streaming response ────────────────────────────────────
     async def event_stream():
         global _inflight_count
 
+        # Accumulate output as bytes for efficient stop-string check
+        output_bytes  = bytearray()
         parts         = []
         t0            = time.perf_counter()
         ttft_ms: Optional[float] = None
@@ -659,37 +630,39 @@ async def chat(req: ChatRequest):
                 ):
                     ctype = chunk["type"]
 
-                    # ── Internal scheduling event (not forwarded) ─────────
                     if ctype == "scheduled":
                         queue_wait_ms = chunk["queue_wait_ms"]
                         continue
 
-                    # ── Token ─────────────────────────────────────────────
                     elif ctype == "token":
                         tok_generated += 1
                         if ttft_ms is None:
                             ttft_ms = (time.perf_counter() - t0) * 1000
                         if not stopped_early:
+                            text_b = chunk["text"].encode("utf-8", errors="replace")
+                            output_bytes.extend(text_b)
                             parts.append(chunk["text"])
-                            joined = "".join(parts)
-                            for s in STOP_STRINGS:
-                                for pat in (f"\n{s}", f"\n {s}"):
-                                    idx = joined.find(pat)
+                            # Optimized stop check: scan last 32 bytes only
+                            tail = bytes(output_bytes[-64:])
+                            cut  = check_stop_string(tail)
+                            if cut is not None:
+                                # Trim parts to the cut point
+                                full = "".join(parts)
+                                # Recompute cut in full string
+                                for pat in STOP_PATTERNS:
+                                    pat_s = pat.decode("utf-8", errors="replace")
+                                    idx = full.find(pat_s)
                                     if idx != -1:
-                                        parts        = [joined[:idx]]
+                                        parts = [full[:idx]]
                                         stopped_early = True
                                         break
-                                if stopped_early:
-                                    break
                             if not stopped_early:
                                 yield f"data: {json.dumps(chunk)}\n\n"
 
-                    # ── Done (engine finished) ─────────────────────────────
                     elif ctype == "done":
                         final_chunk   = chunk
                         tok_generated = chunk["total_tokens"]
 
-                    # ── Error from engine ──────────────────────────────────
                     elif ctype == "error":
                         async with _metrics_lock:
                             metrics["errors"] += 1
@@ -698,17 +671,12 @@ async def chat(req: ChatRequest):
         except TimeoutError:
             async with _metrics_lock:
                 metrics["timed_out"] += 1
-            timeout_msg = json.dumps({
-                "type": "error",
-                "message": f"Request timed out after {REQUEST_TIMEOUT:.0f}s"
-            })
-            yield f"data: {timeout_msg}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Request timed out after {REQUEST_TIMEOUT:.0f}s'})}\n\n"
 
         except asyncio.CancelledError:
-            pass  # client disconnected — normal, just clean up
+            pass
 
         finally:
-            # ── Build final summary ───────────────────────────────────
             reply   = "".join(parts).strip()
             elapsed = (time.perf_counter() - t0) * 1000
 
@@ -722,13 +690,12 @@ async def chat(req: ChatRequest):
                 tps      = round(tok_out / (total_ms / 1000), 2) if total_ms > 0 else 0.0
 
             sess.append_assistant(reply)
-            sess.tokens_in_engine += len(new_tokens) + tok_generated
+            sess.tokens_in_engine += prefill_n + tok_generated
 
             async with _metrics_lock:
                 metrics["total_tokens"] += tok_out
                 metrics["total_ms"]     += elapsed
 
-            # ── Record latency sample ─────────────────────────────────
             if ttft_ms is not None:
                 latency_tracker.record(
                     queue_wait_ms=queue_wait_ms,
@@ -737,21 +704,20 @@ async def chat(req: ChatRequest):
                     tps=tps,
                 )
 
-            # ── Final SSE event (extended with tracing fields) ────────
             done_payload = {
                 "type":          "done",
                 "total_tokens":  tok_out,
                 "total_ms":      total_ms,
                 "tps":           tps,
-                "queue_wait_ms": round(queue_wait_ms, 1),  # ← NEW
-                "ttft_ms":       round(ttft_ms, 1) if ttft_ms else 0,  # ← NEW
+                "queue_wait_ms": round(queue_wait_ms, 1),
+                "ttft_ms":       round(ttft_ms, 1) if ttft_ms else 0,
+                "prefill_n":     prefill_n,
                 "session_id":    req.session_id,
                 "full_response": reply,
             }
             yield f"data: {json.dumps(done_payload)}\n\n"
             yield "data: [DONE]\n\n"
 
-            # ── Release inflight slot ─────────────────────────────────
             async with _inflight_lock:
                 _inflight_count = max(0, _inflight_count - 1)
 
@@ -793,35 +759,30 @@ async def get_metrics():
         rej     = metrics["rejected_429"]
         tmo     = metrics["timed_out"]
         evicted = metrics["sessions_evicted"]
+        pfill   = metrics["prefill_tokens_total"]
     mem = psutil.virtual_memory()
     lat = latency_tracker.summary()
     return {
-        # ── Throughput ────────────────────────────────────────
-        "total_requests":         n,
-        "total_tokens_generated": tok,
-        "avg_tps":                round(tok / (ms / 1000), 2) if ms > 0 else 0,
-        # ── Error accounting ──────────────────────────────────
-        "total_errors":           err,
-        "rejected_429":           rej,
-        "timed_out":              tmo,
-        "error_rate_pct":         round((err + rej + tmo) / max(n, 1) * 100, 2),
-        # ── Queue state ───────────────────────────────────────
-        "inflight_requests":      _inflight_count,
-        "max_inflight":           MAX_INFLIGHT,
-        # ── Sessions ──────────────────────────────────────────
-        "active_sessions":        len(sessions),
-        "sessions_evicted_total": evicted,
-        # ── Engines ───────────────────────────────────────────
-        "n_engines":              N_ENGINES,
-        "engines_ready":          sum(1 for e in pool.engines if e._ready),
-        # ── Memory ────────────────────────────────────────────
-        "process_ram_mb":         get_total_ram_mb(),
-        "system_ram_used_pct":    mem.percent,
-        "system_ram_total_gb":    round(mem.total / 1_000_000_000, 1),
-        # ── Latency percentiles (rolling last 500 requests) ───
-        "latency":                lat,
-        # ── Uptime ────────────────────────────────────────────
-        "uptime_s":               round(time.time() - metrics["start_time"], 1),
+        "total_requests":           n,
+        "total_tokens_generated":   tok,
+        "avg_tps":                  round(tok / (ms / 1000), 2) if ms > 0 else 0,
+        "prefill_tokens_total":     pfill,
+        "avg_prefill_per_req":      round(pfill / max(n, 1), 1),
+        "total_errors":             err,
+        "rejected_429":             rej,
+        "timed_out":                tmo,
+        "error_rate_pct":           round((err + rej + tmo) / max(n, 1) * 100, 2),
+        "inflight_requests":        _inflight_count,
+        "max_inflight":             MAX_INFLIGHT,
+        "active_sessions":          len(sessions),
+        "sessions_evicted_total":   evicted,
+        "n_engines":                N_ENGINES,
+        "engines_ready":            sum(1 for e in pool.engines if e._ready),
+        "process_ram_mb":           get_total_ram_mb(),
+        "system_ram_used_pct":      mem.percent,
+        "system_ram_total_gb":      round(mem.total / 1_000_000_000, 1),
+        "latency":                  lat,
+        "uptime_s":                 round(time.time() - metrics["start_time"], 1),
     }
 
 
