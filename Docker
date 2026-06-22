@@ -1,35 +1,19 @@
-# Use a slim Python image
 FROM python:3.10-slim
 
-# Install g++ and OpenMP for the C++ code
-RUN apt-get update && apt-get install -y \
-    g++ \
-    libomp-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set the working directory
 WORKDIR /app
-
-# Copy all your files into the container
 COPY . /app
 
-# Compile the C++ inference engine. 
-# IMPORTANT: I removed `-mavx2` for compatibility on Hugging Face's free tier.
-# It can cause issues on some cloud CPUs. We are generating a Linux binary called 'inference'.
-RUN g++ -O3 -march=native -fopenmp -mfma -std=c++17 inference.cpp -o inference -lm
+RUN apt-get update && apt-get install -y g++ libomp-dev curl && rm -rf /var/lib/apt/lists/*
 
-# Make the compiled binary executable
+RUN g++ -O3 -march=native -fopenmp -mfma -std=c++17 inference.cpp -o inference -lm
 RUN chmod +x inference
 
-# Install your Python requirements
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create a user to run the app (HF requirement for some spaces)
-RUN useradd -m appuser && chown -R appuser /app
-USER appuser
 
-# Expose port 7860 (Hugging Face standard)
+RUN curl -L -o /app/model.bin "https://huggingface.co/spaces/NOT-OMEGA/Inference/resolve/main/model.bin" && \
+    curl -L -o /app/tokenizer.bin "https://huggingface.co/spaces/NOT-OMEGA/Inference/resolve/main/tokenizer.bin"
+
 EXPOSE 7860
 
-# Command to run your FastAPI app
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
