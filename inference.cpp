@@ -1,8 +1,4 @@
-/*
- * OPTIMIZED SLM 50M INFERENCE ENGINE
- * Target: i3 11th Gen | Windows 11 | 8GB RAM
- * OpenMP Parallel + AVX2 Auto Vectorized
- */
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,15 +7,11 @@
 #include <time.h>
 #include <vector>
 #include <algorithm>
-#include <immintrin.h> // REQUIRED FOR AVX2 SIMD
+#include <immintrin.h> 
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-
-// ---------------------------------------------------------------------------
-// Config & Structures
-// ---------------------------------------------------------------------------
 
 typedef struct {
     int n_layer;
@@ -47,10 +39,6 @@ static Config cfg;
 static Weights W;
 static float* model_data_buffer = NULL;
 
-// ---------------------------------------------------------------------------
-// Math Kernels
-// ---------------------------------------------------------------------------
-
 static void layer_norm(float* out, const float* x, const float* w, const float* b, int size) {
     float mean = 0.0f, var = 0.0f;
 
@@ -69,34 +57,34 @@ static void layer_norm(float* out, const float* x, const float* w, const float* 
         out[i] = (x[i] - mean) * scale * w[i] + b[i];
 }
 
-// OpenMP + AVX2 + FMA parallelized matmul
+
 static void matmul_vec(float* out, const float* mat, const float* x, int M, int K) {
 
 #pragma omp parallel for
     for (int i = 0; i < M; i++) {
         const float* row = mat + (long long)i * K;
         
-        // Initialize a 256-bit vector with all zeros
+       
         __m256 sum_vec = _mm256_setzero_ps();
         
         int j = 0;
-        // Process 8 floats at a time
+       
         for (; j <= K - 8; j += 8) {
-            // Load 8 floats from the matrix row and the input vector
+            
             __m256 m_val = _mm256_loadu_ps(&row[j]);
             __m256 x_val = _mm256_loadu_ps(&x[j]);
             
-            // FMA (Fused Multiply-Add): sum_vec += m_val * x_val
+          
             sum_vec = _mm256_fmadd_ps(m_val, x_val, sum_vec);
         }
         
-        // Extract the 8 floats back out and sum them horizontally
+        
         float sum_arr[8];
         _mm256_storeu_ps(sum_arr, sum_vec);
         float sum = sum_arr[0] + sum_arr[1] + sum_arr[2] + sum_arr[3] + 
                     sum_arr[4] + sum_arr[5] + sum_arr[6] + sum_arr[7];
 
-        // Handle any leftover elements if K is not a multiple of 8
+       
         for (; j < K; j++) {
             sum += row[j] * x[j];
         }
@@ -144,10 +132,6 @@ static void softmax_inplace(float* x, int N) {
         x[i] /= sum;
 }
 
-// ---------------------------------------------------------------------------
-// Transformer Forward
-// ---------------------------------------------------------------------------
-
 static void forward(
     int token_id,
     int pos,
@@ -193,7 +177,7 @@ static void forward(
             float* q_h = q + h * hs;
             float scale = 1.0f / sqrtf((float)hs);
             
-            // Give each thread its own slice of the attention buffer
+            
             float* local_attn = attn_buf + h * cfg.block_size;
 
             for (int t = 0; t <= pos; t++) {
@@ -237,10 +221,6 @@ static void forward(
     layer_norm(buf, x, W.ln_f_w, W.ln_f_b, C);
     matmul_vec(logits, W.lm_head_w, buf, cfg.vocab_size, C);
 }
-
-// ---------------------------------------------------------------------------
-// Weight Mapping
-// ---------------------------------------------------------------------------
 
 static void map_weights(float* data) {
 
@@ -290,9 +270,6 @@ static void map_weights(float* data) {
     W.lm_head_w = ptr;
 }
 
-// ---------------------------------------------------------------------------
-// MAIN
-// ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
 
